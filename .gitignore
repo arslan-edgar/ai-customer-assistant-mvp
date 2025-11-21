@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+*.env
+
+# Node / React
+node_modules/
+dist/
+.vite/
+
+# Logs and databases
+*.log
+*.sqlite
+accepted_log.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
