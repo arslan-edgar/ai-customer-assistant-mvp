@@ -11,7 +11,7 @@ LOG_PATH = os.path.join(ROOT, "accepted_log.json")
 app = Flask(__name__)
 CORS(app)
 
-# In-memory demo tickets (same as before)
+# In-memory demo tickets
 tickets = [
     {
         "ticket_id": "tkt_001",
@@ -78,19 +78,27 @@ def suggest_reply():
 def accept():
     """
     Expected body:
-    { "ticket_id": "...", "action": "accepted" | "edited", "tags": [{"tag":"x","score":0.8}, ...], "response_time_min": 12 }
+    {
+      "ticket_id":"tkt_001",
+      "action":"accepted"|"edited",
+      "tags":[...],
+      "response_time_min": 12,
+      "final_reply": "the final text sent to customer"
+    }
     """
     payload = request.json or {}
     ticket_id = payload.get("ticket_id")
     action = payload.get("action", "accepted")
     tags = payload.get("tags", [])
-    response_time = payload.get("response_time_min")  # optional
+    response_time = payload.get("response_time_min")
+    final_reply = payload.get("final_reply")  # may be None
 
     entry = {
         "ticket_id": ticket_id,
         "action": action,
         "tags": tags,
         "response_time_min": response_time,
+        "final_reply": final_reply,
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
@@ -103,12 +111,16 @@ def accept():
 @app.route("/metrics", methods=["GET"])
 def metrics():
     """
-    Returns computed metrics from the accepted_log.json plus in-memory tickets/suggestions counts.
+    Returns computed metrics from the accepted_log.json plus in-memory suggestions_shown value passed by frontend.
+    Query param: total_shown (int)
     """
     log = load_log()
+    try:
+        total_shown = int(request.args.get("total_shown", 0))
+    except Exception:
+        total_shown = 0
 
-    total_shown = int(request.args.get("total_shown", 0))  # frontend can pass suggestionsShown so remote can combine
-    suggestions_accepted = sum(1 for e in log if e.get("action") == "accepted")
+    suggestions_accepted = sum(1 for e in log if e.get("action") == "accepted" or e.get("action") == "edited")
     # compute tag counts
     tag_counts = {}
     for e in log:

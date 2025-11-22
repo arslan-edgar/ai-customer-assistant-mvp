@@ -1,36 +1,24 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 
-/**
- * App.jsx
- * Full frontend for the MVP:
- * - Loads tickets from Flask backend (/tickets)
- * - Calls /suggest to get a suggested reply
- * - Posts accepts to /accept and fetches metrics from /metrics
- * - Shows a small ops dashboard (suggestions shown, accepted, acceptance rate, avg response time, top tags)
- *
- * Notes:
- * - Backend assumed at http://127.0.0.1:5000
- * - This is a simple demo; in production you'd handle auth, errors, retries, and input validation.
- */
-
 const BACKEND = "http://127.0.0.1:5000";
 
 function App() {
   const [tickets, setTickets] = useState([]);
   const [selectedTicket, setSelectedTicket] = useState(null);
-  const [suggestion, setSuggestion] = useState(null);
+  const [suggestion, setSuggestion] = useState(null); // raw suggestion object from backend
+  const [editedReply, setEditedReply] = useState("");   // editable textarea content
   const [loading, setLoading] = useState(false);
 
-  // Dashboard state tracked locally and also fetched from backend
+  // Dashboard state
   const [metrics, setMetrics] = useState({
     suggestionsShown: 0,
     suggestionsAccepted: 0,
-    tagCounts: {},       // { tagName: count }
-    responseTimes: []    // list of minutes (simulated or from backend)
+    tagCounts: {},
+    responseTimes: []
   });
 
-  // -- Load tickets on mount
+  // Load tickets on mount
   useEffect(() => {
     async function loadTickets() {
       try {
@@ -43,124 +31,141 @@ function App() {
     loadTickets();
   }, []);
 
-  // -- Fetch metrics from backend (used after accepts and periodically)
-  const fetchMetricsFromServer = async (totalShown = metrics.suggestionsShown) => {
-    try {
-      const res = await axios.get(`${BACKEND}/metrics`, {
-        params: { total_shown: totalShown }
-      });
-      const data = res.data || {};
-      setMetrics(prev => ({
-        ...prev,
-        // prefer server values for accepted counts and tagCounts
-        suggestionsAccepted: Number(data.suggestions_accepted ?? prev.suggestionsAccepted ?? 0),
-        // server tag_counts is an object {tag: count}
-        tagCounts: data.tag_counts ?? prev.tagCounts,
-        // keep responseTimes locally (we append simulated times on accept),
-        // but update avg/time info when available from server (we store responseTimes to compute avg locally)
-        // If server provides avg_response_time_min we won't replace the array, but UI reads computed avg.
-        // Keep suggestionsShown as local count (frontend increments when suggestion shown)
-      }));
-      return data;
-    } catch (err) {
-      console.error("Failed to fetch metrics:", err);
-      return null;
-    }
-  };
-
-  // Periodically poll metrics (so dashboard shows recent backend state)
+  // Periodically refresh server metrics (so dashboard stays consistent)
   useEffect(() => {
-    const id = setInterval(() => {
-      fetchMetricsFromServer();
-    }, 8000); // every 8s
+    const id = setInterval(async () => {
+      try {
+        const res = await axios.get(`${BACKEND}/metrics`, { params: { total_shown: metrics.suggestionsShown }});
+        const data = res.data || {};
+        setMetrics(prev => ({
+          ...prev,
+          suggestionsAccepted: Number(data.suggestions_accepted ?? prev.suggestionsAccepted ?? 0),
+          tagCounts: data.tag_counts ?? prev.tagCounts,
+        }));
+      } catch (err) {
+        // silent
+      }
+    }, 8000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // run once
+  }, [metrics.suggestionsShown]);
 
-  // Compute acceptance rate and average response time for UI display
   const acceptanceRate = metrics.suggestionsShown === 0
     ? 0
     : Math.round((Number(metrics.suggestionsAccepted || 0) / metrics.suggestionsShown) * 100);
 
   const avgResponseTime = metrics.responseTimes && metrics.responseTimes.length > 0
-    ? Math.round(metrics.responseTimes.reduce((a,b) => a + b, 0) / metrics.responseTimes.length)
+    ? Math.round(metrics.responseTimes.reduce((a,b)=>a+b,0) / metrics.responseTimes.length)
     : 0;
 
-  // Suggest handler -> calls backend /suggest and updates UI and suggestionsShown
+  // Request an AI suggestion for the selected ticket
   const handleSuggest = async () => {
     if (!selectedTicket) return;
     setLoading(true);
     setSuggestion(null);
+    setEditedReply("");
 
     try {
-      const res = await axios.post(`${BACKEND}/suggest`, {
-        ticket_id: selectedTicket.ticket_id
-      });
-      const payload = res.data;
-      setSuggestion(payload || null);
-
-      // increment local suggestionsShown
+      const res = await axios.post(`${BACKEND}/suggest`, { ticket_id: selectedTicket.ticket_id });
+      const payload = res.data || null;
+      setSuggestion(payload);
+      // prefill editable textarea with the returned suggestion text
+      setEditedReply(payload?.suggestion || "");
+      // increment suggestionsShown locally
       setMetrics(prev => ({ ...prev, suggestionsShown: (prev.suggestionsShown || 0) + 1 }));
     } catch (err) {
       console.error("Error getting suggestion:", err);
-      alert("Error getting suggestion (see console).");
+      alert("Error getting suggestion (see console)");
     } finally {
       setLoading(false);
     }
   };
 
-  // Accept handler -> POST to backend /accept, then refresh metrics from backend
-  const handleAccept = async () => {
+  // Accept unchanged suggestion (final_reply = suggestion.suggestion)
+  const handleAcceptUnchanged = async () => {
     if (!suggestion || !selectedTicket) return;
-
-    // simulate a response time in minutes (5-60)
     const simulatedResponseMinutes = Math.round(5 + Math.random() * 55);
 
     const payload = {
       ticket_id: selectedTicket.ticket_id,
       action: "accepted",
       tags: suggestion.tags || [],
-      response_time_min: simulatedResponseMinutes
+      response_time_min: simulatedResponseMinutes,
+      final_reply: suggestion.suggestion
     };
 
     try {
       await axios.post(`${BACKEND}/accept`, payload);
 
-      // Update local responseTimes with the simulated time
+      // update local responseTimes
       setMetrics(prev => ({
         ...prev,
         responseTimes: [...(prev.responseTimes || []), simulatedResponseMinutes]
       }));
 
-      // After accept, fetch server metrics (pass current suggestionsShown so server can compute acceptance rate)
-      const serverData = await fetchMetricsFromServer(metrics.suggestionsShown);
+      // fetch updated metrics from server
+      const serverData = await axios.get(`${BACKEND}/metrics`, { params: { total_shown: metrics.suggestionsShown }});
+      const d = serverData.data || {};
+      setMetrics(prev => ({
+        ...prev,
+        suggestionsAccepted: Number(d.suggestions_accepted ?? prev.suggestionsAccepted),
+        tagCounts: d.tag_counts ?? prev.tagCounts
+      }));
 
-      // merge server tag counts into local tagCounts for display if returned
-      if (serverData && serverData.tag_counts) {
-        setMetrics(prev => ({
-          ...prev,
-          tagCounts: serverData.tag_counts
-        }));
-      }
-
-      // clear suggestion (move to next ticket)
       setSuggestion(null);
+      setEditedReply("");
     } catch (err) {
-      console.error("Failed to send accept:", err);
-      alert("Failed to record accept. See console for details.");
+      console.error("Error accepting suggestion:", err);
+      alert("Failed to record accept. See console.");
     }
   };
 
-  // Small helper to show top tags from metrics.tagCounts
+  // Accept edited reply (final_reply = editedReply)
+  const handleAcceptEdited = async () => {
+    if (!suggestion || !selectedTicket) return;
+    const simulatedResponseMinutes = Math.round(5 + Math.random() * 55);
+
+    const payload = {
+      ticket_id: selectedTicket.ticket_id,
+      action: "edited",
+      tags: suggestion.tags || [],
+      response_time_min: simulatedResponseMinutes,
+      final_reply: editedReply
+    };
+
+    try {
+      await axios.post(`${BACKEND}/accept`, payload);
+
+      setMetrics(prev => ({
+        ...prev,
+        responseTimes: [...(prev.responseTimes || []), simulatedResponseMinutes]
+      }));
+
+      const serverData = await axios.get(`${BACKEND}/metrics`, { params: { total_shown: metrics.suggestionsShown }});
+      const d = serverData.data || {};
+      setMetrics(prev => ({
+        ...prev,
+        suggestionsAccepted: Number(d.suggestions_accepted ?? prev.suggestionsAccepted),
+        tagCounts: d.tag_counts ?? prev.tagCounts
+      }));
+
+      setSuggestion(null);
+      setEditedReply("");
+    } catch (err) {
+      console.error("Error accepting edited reply:", err);
+      alert("Failed to record edited accept. See console.");
+    }
+  };
+
+  // Utility: top tags display
   const topTags = Object.entries(metrics.tagCounts || {})
     .sort((a,b) => b[1] - a[1])
-    .slice(0, 5)
+    .slice(0,5)
     .map(([tag, count]) => `${tag} (${count})`)
     .join(", ");
 
   return (
     <div style={{ display: "flex", padding: "20px", gap: "20px", fontFamily: "sans-serif" }}>
-      {/* Left: Ticket list */}
+      {/* Ticket list */}
       <div style={{ width: "30%", borderRight: "1px solid #ddd", paddingRight: "20px" }}>
         <h2>Tickets</h2>
         {tickets.length === 0 && <p>Loading tickets...</p>}
@@ -175,7 +180,7 @@ function App() {
               background: selectedTicket?.ticket_id === t.ticket_id ? "#e8f4ff" : "#ffffff",
               color: "#222"
             }}
-            onClick={() => { setSelectedTicket(t); setSuggestion(null); }}
+            onClick={() => { setSelectedTicket(t); setSuggestion(null); setEditedReply(""); }}
           >
             <strong>{t.subject}</strong>
             <p style={{ fontSize: "0.9rem" }}>{t.body}</p>
@@ -183,7 +188,7 @@ function App() {
         ))}
       </div>
 
-      {/* Middle: Ticket + Suggest button */}
+      {/* Middle: AI Assistant + edit area */}
       <div style={{ width: "40%" }}>
         <h2>AI Assistant</h2>
 
@@ -193,21 +198,19 @@ function App() {
             <p>{selectedTicket.body}</p>
 
             <div style={{ marginBottom: 12 }}>
-              <button
-                onClick={handleSuggest}
-                disabled={loading}
-                style={{ padding: "8px 14px", borderRadius: 8 }}
-              >
+              <button onClick={handleSuggest} disabled={loading} style={{ padding: "8px 14px", borderRadius: 8 }}>
                 {loading ? "Thinking..." : "Suggest response"}
               </button>
 
               {suggestion && (
-                <button
-                  onClick={handleAccept}
-                  style={{ marginLeft: 10, padding: "8px 14px", borderRadius: 8 }}
-                >
-                  Accept
-                </button>
+                <>
+                  <button onClick={handleAcceptUnchanged} style={{ marginLeft: 10, padding: "8px 10px", borderRadius: 8 }}>
+                    Accept Unchanged
+                  </button>
+                  <button onClick={handleAcceptEdited} style={{ marginLeft: 8, padding: "8px 10px", borderRadius: 8 }}>
+                    Accept Edited
+                  </button>
+                </>
               )}
             </div>
           </>
@@ -223,11 +226,30 @@ function App() {
             background: "#ffffff",
             color: "#222"
           }}>
-            <h3>Suggested Reply</h3>
-            <p>{suggestion.suggestion}</p>
-            <p><strong>Explanation:</strong> {suggestion.explanation}</p>
-            <p><strong>Confidence:</strong> {Math.round((suggestion.confidence || 0) * 100)}%</p>
-            <p><strong>Tags:</strong> {(suggestion.tags || []).map(t => (t.tag || t)).join(", ")}</p>
+            <h3>Suggested Reply (editable)</h3>
+
+            <div style={{ marginBottom: 8 }}>
+              <em>Model explanation:</em> <span>{suggestion.explanation}</span>
+            </div>
+
+            <textarea
+              value={editedReply}
+              onChange={(e) => setEditedReply(e.target.value)}
+              style={{
+                width: "100%",
+                height: "120px",
+                padding: "10px",
+                fontSize: "1rem",
+                border: "1px solid #ccc",
+                borderRadius: "6px",
+                boxSizing: "border-box"
+              }}
+            />
+
+            <div style={{ marginTop: 10 }}>
+              <div><strong>Confidence:</strong> {Math.round((suggestion.confidence || 0) * 100)}%</div>
+              <div><strong>Tags:</strong> {(suggestion.tags || []).map(t => (t.tag || t)).join(", ")}</div>
+            </div>
           </div>
         )}
       </div>
@@ -241,7 +263,7 @@ function App() {
         </div>
 
         <div style={{ marginBottom: 10 }}>
-          <strong>Accepted:</strong> {metrics.suggestionsAccepted ?? 0}
+          <strong>Accepted (incl. edited):</strong> {metrics.suggestionsAccepted ?? 0}
         </div>
 
         <div style={{ marginBottom: 10 }}>
@@ -259,7 +281,7 @@ function App() {
         <hr />
 
         <div style={{ fontSize: 12, color: "#666" }}>
-          (Metrics are persisted in backend accepted_log.json)
+          (Metrics persisted in backend/accepted_log.json)
         </div>
       </div>
     </div>
